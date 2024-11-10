@@ -1,0 +1,33 @@
+flowchart TB
+    subgraph Sources
+        LinkedIn[LinkedIn API]
+        HH[HH.ru API]
+        Telegram[Telegram API]
+        Careers[Career Pages]
+    end
+
+    subgraph Bronze["Bronze Layer (Raw)"]
+        Raw[("Raw Files\n(gzipped JSON/HTML)")]
+        Meta[("Metadata Store\n(SQLite/PostgreSQL)")]
+        Sources --> Raw
+        Sources --> Meta
+    end
+
+    subgraph Silver["Silver Layer (Processed)"]
+        CDC["Change Detection"]
+        Clean["Basic Cleaning"]
+        Stand["Data Standardization"]
+        Raw --> CDC
+        Meta --> CDC
+        CDC --> Clean
+        Clean --> Stand
+    end
+
+    subgraph Gold["Gold Layer (Analytics)"]
+        Mart["Data Marts"]
+        ML["ML Features"]
+        Stand --> Mart
+        Stand --> ML
+    end
+
+    Meta -..-> |"Deduplication\nCheck"| Sources
