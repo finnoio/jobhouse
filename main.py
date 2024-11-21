@@ -1,6 +1,8 @@
 import asyncio
+import json
+from pathlib import Path
 
-from src.extract.async_client import HHAsyncClient
+from src.extract.hh_api import HHAsyncClient
 
 
 async def main():
@@ -9,12 +11,18 @@ async def main():
     }
 
     source = HHAsyncClient(config)
+    all_postings = []
+    await source._ensure_session()
     try:
         async for posting in source.fetch_postings("data engineer"):
-            print(f"Found posting: {posting.source_id}")
-            print(f"Found posting: {posting.raw_content}")
+            all_postings.append(posting.raw_content)
     finally:
         await source.close()
+
+    output_file = "postings.json"
+    with Path(output_file).open("w", encoding="utf-8") as f:
+        json.dump(all_postings, f, ensure_ascii=False, indent=4)
+        print(f"Saved all postings to {output_file}")
 
 
 if __name__ == "__main__":
