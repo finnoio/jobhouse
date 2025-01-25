@@ -5,14 +5,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
     environment:
       # PostgreSQL connection
-      POSTGRES_HOST: postgres
-      POSTGRES_DB: appdb
-      POSTGRES_USER: appuser
-      POSTGRES_PASSWORD: apppassword
+      POSTGRES_DB: jobs_meta
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
 
       # MinIO connection
       MINIO_ENDPOINT: http://minio:9000
@@ -30,9 +27,9 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_DB: appdb
-      POSTGRES_USER: appuser
-      POSTGRES_PASSWORD: apppassword
+      POSTGRES_DB: jobs_meta
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Initialize database schemas and users
@@ -40,7 +37,7 @@ services:
     networks:
       - app-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U appuser -d appdb"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -65,20 +62,20 @@ services:
       retries: 3
 
   # MinIO bucket creation service
-  createbuckets:
-    image: minio/mc
-    depends_on:
-      - minio
-    entrypoint: >
-      /bin/sh -c "
-      sleep 10;
-      /usr/bin/mc alias set myminio http://minio:9000 minio_access_key minio_secret_key;
-      /usr/bin/mc mb myminio/app-bucket;
-      /usr/bin/mc policy set public myminio/app-bucket;
-      exit 0;
-      "
-    networks:
-      - app-network
+#  createbuckets:
+#    image: minio/mc
+#    depends_on:
+#      - minio
+#    entrypoint: >
+#      /bin/sh -c "
+#      sleep 10;
+#      /usr/bin/mc alias set myminio http://minio:9000 minio_access_key minio_secret_key;
+#      /usr/bin/mc mb myminio/app-bucket;
+#      /usr/bin/mc policy set public myminio/app-bucket;
+#      exit 0;
+#      "
+#    networks:
+#      - app-network
 
 volumes:
   postgres_data:

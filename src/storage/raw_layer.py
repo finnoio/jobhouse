@@ -18,14 +18,14 @@ class S3RawLayerStorage:
     def __init__(
             self,
             bucket: str,
-            metadata_db_path: str,
+            metadata_db_conn_str: str,
             endpoint_url: str,  # MinIO endpoint
             aws_access_key_id: str,
             aws_secret_access_key: str,
             region_name: str = 'us-east-1'  # MinIO default
     ):
         self.bucket = bucket
-        self.metadata_db_path = metadata_db_path
+        self.metadata_db_conn_str = metadata_db_conn_str
         self._s3_config = {
             'endpoint_url': endpoint_url,
             'aws_access_key_id': aws_access_key_id,
@@ -45,22 +45,25 @@ class S3RawLayerStorage:
                 await s3.create_bucket(Bucket=self.bucket)
 
         # Initialize pg database for metadata
-        async with aiopg.connect(self.metadata_db_path) as db:
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS posting_metadata (
-                    posting_id TEXT PRIMARY KEY,
-                    source TEXT NOT NULL, 
-                    batch_id TEXT NOT NULL,
-                    s3_key TEXT NOT NULL,
-                    created_at TIMESTAMP NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    etag TEXT NOT NULL,
+        async with aiopg.create_pool(self.metadata_db_conn_str) as pool:
+            async with pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('''CREATE TABLE IF NOT EXISTS posting_metadata (
+                            posting_id TEXT PRIMARY KEY,
+                            source TEXT NOT NULL, 
+                            batch_id TEXT NOT NULL,
+                            s3_key TEXT NOT NULL,
+                            created_at TIMESTAMP NOT NULL,
+                            size_bytes INTEGER NOT NULL,
+                            etag TEXT NOT NULL
+                        )''')
 
-                    INDEX idx_source_batch (source, batch_id),
-                    INDEX idx_created_at (created_at)
-                )
-            ''')
-            await db.commit()
+                    await cur.execute('''
+                        CREATE INDEX IF NOT EXISTS idx_posting_metadata_posting_id ON posting_metadata (posting_id);
+                    ''')
+                    await cur.execute('''
+                        CREATE INDEX IF NOT EXISTS idx_posting_metadata_source_batch_id ON posting_metadata (source, batch_id);
+                    ''')
 
     def _get_s3_key(self, posting: RawJobPosting, batch_id: str) -> str:
         """Generate S3 key for a posting batch"""
@@ -138,42 +141,43 @@ class S3RawLayerStorage:
                 metadata_list.append(metadata)
 
         # Store metadata
-        async with aiosqlite.connect(self.metadata_db_path) as db:
-            await db.executemany('''
-                INSERT OR REPLACE INTO posting_metadata
-                (posting_id, source, batch_id, s3_key, created_at, size_bytes, etag)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', [(m.posting_id, m.source, m.batch_id, m.s3_key, m.created_at, m.size_bytes, m.etag)
-                  for m in metadata_list])
-            await db.commit()
+        async with aiopg.connect(self.metadata_db_conn_str) as db:
+            async with db.cursor() as cur:
+                await cur.executemany('''
+                    INSERT OR REPLACE INTO posting_metadata
+                    (posting_id, source, batch_id, s3_key, created_at, size_bytes, etag)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', [(m.posting_id, m.source, m.batch_id, m.s3_key, m.created_at, m.size_bytes, m.etag) for m in metadata_list])
 
         for metadata in metadata_list:
             yield metadata
 
     async def get_posting_metadata(self, posting_id: str) -> Optional[StorageMetadata]:
         """Retrieve metadata for a specific posting"""
-        async with aiosqlite.connect(self.metadata_db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                    'SELECT * FROM posting_metadata WHERE posting_id = ?',
-                    (posting_id,)
-            ) as cursor:
-                row = await cursor.fetchone()
+
+        async with aiopg.connect(self.metadata_db_conn_str) as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                        'SELECT * FROM posting_metadata WHERE posting_id = ?',
+                        (posting_id,)
+                )
+                row = await cur.fetchone()
                 if row:
                     return StorageMetadata(**dict(row))
-                return None
+                else:
+                    return None
 
     async def implement_retention_policy(self, days: int):
         """Remove objects older than specified days"""
         cutoff = datetime.now() - timedelta(days=days)
-
-        async with aiosqlite.connect(self.metadata_db_path) as db:
-            # Get objects to delete
-            async with db.execute(
-                    'SELECT DISTINCT s3_key FROM posting_metadata WHERE created_at < ?',
+        async with aiopg.connect(self.metadata_db_conn_str) as db:
+            async with db.cursor() as cur:
+                # Get objects to delete
+                await cur.execute(
+                    'SELECT DISTINCT s3_key FROM posting_metadata WHERE created_at < %s',
                     (cutoff,)
-            ) as cursor:
-                keys_to_delete = [row[0] for row in await cursor.fetchall()]
+                )
+                keys_to_delete = [row[0] for row in await cur.fetchall()]
 
             # Delete from S3 in batches
             if keys_to_delete:
@@ -191,47 +195,9 @@ class S3RawLayerStorage:
                         )
 
             # Remove metadata
-            await db.execute(
-                'DELETE FROM posting_metadata WHERE created_at < ?',
-                (cutoff,)
-            )
-            await db.commit()
 
-
-# Example usage:
-async def main():
-    # Initialize storage
-    storage = S3RawLayerStorage(
-        bucket="raw-layer",
-        metadata_db_path="/data/raw/metadata.db",
-        endpoint_url="http://localhost:9000",  # MinIO endpoint
-        aws_access_key_id="minioadmin",
-        aws_secret_access_key="minioadmin"
-    )
-    await storage.initialize()
-
-    # Initialize source
-    config = {
-        'user_agent': 'curl/7.64.1'
-    }
-
-    source = HHAsyncClient(config)
-    try:
-        # Generate batch ID
-        batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        # Store postings
-        async for metadata in storage.store_postings(
-                source.fetch_postings("python developer"),
-                batch_id
-        ):
-            logger.info(f"Stored posting {metadata.posting_id} in s3://{storage.bucket}/{metadata.s3_key}")
-
-        # Implement retention policy
-        await storage.implement_retention_policy(days=7)
-    finally:
-        await source.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            async with db.cursor() as cur:
+                await cur.execute(
+                    'DELETE FROM posting_metadata WHERE created_at < %s',
+                    (cutoff,)
+                )

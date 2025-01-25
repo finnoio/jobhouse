@@ -104,6 +104,7 @@ rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 EOT
 
 COPY docker-entrypoint.sh /
+RUN chmod +x docker-entrypoint.sh
 
 # Copy the pre-built `/app` directory to the runtime container
 # and change the ownership to user app and group app in one step.
@@ -119,8 +120,8 @@ WORKDIR /app
 
 # Strictly optional, but I like it for introspection of what I've built
 # and run a smoke test that the application can, in fact, be imported.
-RUN <<EOT
-python -V
-python -Im site
-python -Ic 'import the_app'
-EOT
+#RUN <<EOT
+#python -V
+#python -Im site
+#python -Ic 'import the_app'
+#EOT

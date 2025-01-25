@@ -76,7 +76,7 @@ class HHAsyncClient(AsyncHttpClientBase):
 
     def _init_rate_limiter(self) -> RateLimiter:
         # HH.ru allows 7 requests per second (https://github.com/hhru/api/issues/74#issuecomment-902696296)
-        return RateLimiter(calls=7, period=1)
+        return RateLimiter(calls=1, period=1)
 
     async def _fetch_single_page(self, page: int, search_text: str) -> Dict:
         """Fetch a single page of vacancy listings."""
@@ -158,7 +158,8 @@ class HHAsyncClient(AsyncHttpClientBase):
                         raw_content=detail_data,
                         metadata={
                             'search_text': search_text,
-                            'found_at': datetime.now().isoformat()
+                            'found_at': datetime.now().isoformat(),
+                            'source': 'HH',
                         },
                         timestamp=datetime.now()
                     )
@@ -167,13 +168,14 @@ class HHAsyncClient(AsyncHttpClientBase):
                 raise
 
     async def fetch_postings(self, search_text: str) -> AsyncIterator[RawJobPosting]:
+        await self._ensure_session()
 
         # Collect all vacancy IDs (now in parallel)
         all_vacancy_ids = await self._fetch_all_vacancy_ids(search_text)
         logger.info(f"Collected {len(all_vacancy_ids)} vacancy IDs")
 
         # Fetch details for all vacancies concurrently
-        batch_size = 10  # Adjust based on rate limits and available resources
+        batch_size = 10
         vacancy_ids = list(all_vacancy_ids)
 
         for i in range(0, len(vacancy_ids), batch_size):
