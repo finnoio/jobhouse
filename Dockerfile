@@ -60,12 +60,20 @@ EOT
 # LEAVE THIS OUT if your application is NOT a proper Python package.
 # As of uv 0.4.11, you can also use
 # `cd /src && uv sync --locked --no-dev --no-editable` instead.
+# Install pip in the virtual environment
+RUN /app/bin/python -m ensurepip
+RUN /app/bin/python -m pip install --upgrade pip
+
 COPY . /src
 RUN --mount=type=cache,target=/root/.cache \
     uv pip install \
         --python=$UV_PROJECT_ENVIRONMENT \
         --no-deps \
         /src
+
+# Debugging steps
+RUN /app/bin/python -m pip list
+RUN ls -l /app/lib/python3.11/site-packages
 
 
 ##########################################################################

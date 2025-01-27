@@ -1,15 +1,13 @@
 from datetime import datetime, timedelta
-import asyncio
 import gzip
 import json
 import logging
-from pathlib import Path
 from typing import AsyncIterator, Optional
 import aioboto3
 import aiopg
 import io
 
-from src.common.data import StorageMetadata, RawJobPosting
+from src.jobhouse.common.data import StorageMetadata, RawJobPosting
 
 logger = logging.getLogger(__name__)
 

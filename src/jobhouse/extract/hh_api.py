@@ -1,14 +1,13 @@
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
-from typing import AsyncIterator, Optional, List, Set, Dict
+from typing import AsyncIterator, Optional, Set, Dict
 import asyncio
 import aiohttp
 import logging
 from collections import deque
-import requests
 
-from src.common.data import RawJobPosting
+from src.jobhouse.common.data import RawJobPosting
 
 logger = logging.getLogger(__name__)
 

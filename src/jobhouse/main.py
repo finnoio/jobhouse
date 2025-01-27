@@ -1,11 +1,9 @@
 import asyncio
-import json
-from pathlib import Path
 import logging
 from datetime import datetime
 
-from src.extract.hh_api import HHAsyncClient
-from src.storage.raw_layer import S3RawLayerStorage
+from src.jobhouse.extract.hh_api import HHAsyncClient
+from src.jobhouse.storage.raw_layer import S3RawLayerStorage
 
 logger = logging.getLogger(__name__)
 
