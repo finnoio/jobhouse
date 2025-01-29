@@ -7,7 +7,7 @@ import aiohttp
 import logging
 from collections import deque
 
-from src.jobhouse.common.data import RawJobPosting
+from src.common.data import RawJobPosting
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class AsyncHttpClientBase(ABC):
     async def _ensure_session(self):
         """Ensure aiohttp session exists"""
         if self._session is None:
-            access_token = os.getenv("HH_ACCESS_TOKEN")
+            access_token = os.getenv("HH_ACCESS_TOKEN")  # TODO: Move to config
             headers = {"Authorization": f"Bearer {access_token}"}
             self._session = aiohttp.ClientSession(headers=headers)
 

@@ -7,7 +7,7 @@ import aioboto3
 import aiopg
 import io
 
-from src.jobhouse.common.data import StorageMetadata, RawJobPosting
+from src.common import StorageMetadata, RawJobPosting
 
 logger = logging.getLogger(__name__)
 

@@ -9,6 +9,7 @@ It uses S3 as an intermediary storage.
 import json
 import os
 from datetime import datetime, timedelta
+import logging
 
 import requests
 from airflow.decorators import dag, task, task_group
@@ -17,6 +18,11 @@ from airflow.models.param import Param
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.amazon.aws.operators.s3 import S3CreateBucketOperator
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+
+from src.extract.hh_api import HHAsyncClient
+from src.storage.raw_layer import S3RawLayerStorage
+
+logger = logging.getLogger(__name__)
 
 # ------------------- #
 # DAG-level variables #
@@ -60,7 +66,7 @@ _TRANSFORM_TASK_ID = "transform"
     },
     tags=["Patterns", "ETL", "Postgres", "Intermediary Storage"],  # add tags in the UI
     params={
-        "coordinates": Param({"latitude": 46.9481, "longitude": 7.4474}, type="object")
+        "search_input": Param("python data engineer", type="string"),
     },  # Airflow params can add interactive options on manual runs. See: https://www.astronomer.io/docs/learn/airflow-params
     template_searchpath=[_SQL_DIR],  # path to the SQL templates
 )
@@ -108,136 +114,163 @@ def etl_intermediary_storage():
 
         url = os.getenv("WEATHER_API_URL")
 
-        coordinates = context["params"]["coordinates"]
-        latitude = coordinates["latitude"]
-        longitude = coordinates["longitude"]
+        search_input = context["params"]["search_input"]
         dag_run_timestamp = context["ts"]
         dag_id = context["dag"].dag_id
         task_id = context["task"].task_id
 
-        url = url.format(latitude=latitude, longitude=longitude)
-
-        response = requests.get(url).json()
-
-        response_bytes = json.dumps(response).encode("utf-8")
-
-        # Save the data to S3
-        hook = S3Hook(aws_conn_id=_AWS_CONN_ID)
-        hook.load_bytes(
-            bytes_data=response_bytes,
-            key=f"{dag_id}/{task_id}/{dag_run_timestamp}.json",
-            bucket_name=_S3_BUCKET,
-            replace=True,
+        # Initialize storage
+        storage = S3RawLayerStorage(
+            bucket="raw-layer",
+            metadata_db_conn_str="postgresql://postgres:postgres@localhost:5432/jobs_meta",
+            endpoint_url="http://localhost:9000",  # MinIO endpoint
+            aws_access_key_id="minio_access_key",
+            aws_secret_access_key="minio_secret_key"
         )
+        await storage.initialize()
 
-    @task(task_id=_TRANSFORM_TASK_ID)
-    def transform(**context):
-        """
-        Transform the data
-        Args:
-            api_response (dict): The full API response
-        Returns:
-            dict: The transformed data
-        """
-
-        dag_run_timestamp = context["ts"]
-        dag_id = context["dag"].dag_id
-        upstream_task_id = _EXTRACT_TASK_ID
-        task_id = context["task"].task_id
-
-        # Load the data from S3
-        hook = S3Hook(aws_conn_id=_AWS_CONN_ID)
-        response = hook.read_key(
-            key=f"{dag_id}/{upstream_task_id}/{dag_run_timestamp}.json",
-            bucket_name=_S3_BUCKET,
-        )
-        api_response = json.loads(response)
-
-        time = api_response["hourly"]["time"]
-
-        transformed_data = {
-            "temperature_2m": api_response["hourly"]["temperature_2m"],
-            "relative_humidity_2m": api_response["hourly"]["relative_humidity_2m"],
-            "precipitation_probability": api_response["hourly"][
-                "precipitation_probability"
-            ],
-            "timestamp": time,
-            "date": [
-                datetime.strptime(x, "%Y-%m-%dT%H:%M").date().strftime("%Y-%m-%d")
-                for x in time
-            ],
-            "day": [datetime.strptime(x, "%Y-%m-%dT%H:%M").day for x in time],
-            "month": [datetime.strptime(x, "%Y-%m-%dT%H:%M").month for x in time],
-            "year": [datetime.strptime(x, "%Y-%m-%dT%H:%M").year for x in time],
-            "last_updated": [dag_run_timestamp for i in range(len(time))],
-            "latitude": [api_response["latitude"] for i in range(len(time))],
-            "longitude": [api_response["longitude"] for i in range(len(time))],
+        # Initialize source
+        config = {
+            'user_agent': 'curl/7.64.1'
         }
 
-        transformed_data_bytes = json.dumps(transformed_data).encode("utf-8")
+        source = HHAsyncClient(config)
+        try:
+            # Generate batch ID
+            batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # Save the data to S3
-        hook = S3Hook(aws_conn_id=_AWS_CONN_ID)
-        hook.load_bytes(
-            bytes_data=transformed_data_bytes,
-            key=f"{dag_id}/{task_id}/{dag_run_timestamp}.json",
-            bucket_name=_S3_BUCKET,
-            replace=True,
-        )
+            # Store postings
+            async for metadata in storage.store_postings(
+                    source.fetch_postings(search_input),
+                    batch_id
+            ):
+                logger.info(f"Stored posting {metadata.posting_id} in s3://{storage.bucket}/{metadata.s3_key}")
 
-    @task
-    def load(**context):
-        """
-        Load the data to the destination without using a temporary CSV file.
-        Args:
-            transformed_data (dict): The transformed data
-        """
-        import csv
-        import io
+            # Implement retention policy
+            await storage.implement_retention_policy(days=7)
+        finally:
+            await source.close()
+        # response = requests.get(url).json()
+        #
+        # response_bytes = json.dumps(response).encode("utf-8")
+        #
+        # # Save the data to S3
+        # hook = S3Hook(aws_conn_id=_AWS_CONN_ID)
+        # hook.load_bytes(
+        #     bytes_data=response_bytes,
+        #     key=f"{dag_id}/{task_id}/{dag_run_timestamp}.json",
+        #     bucket_name=_S3_BUCKET,
+        #     replace=True,
+        # )
 
-        from airflow.providers.postgres.hooks.postgres import PostgresHook
-
-        dag_run_timestamp = context["ts"]
-        dag_id = context["dag"].dag_id
-        upstream_task_id = _TRANSFORM_TASK_ID
-
-        # Load the data from S3
-        hook = S3Hook(aws_conn_id=_AWS_CONN_ID)
-        response = hook.read_key(
-            key=f"{dag_id}/{upstream_task_id}/{dag_run_timestamp}.json",
-            bucket_name=_S3_BUCKET,
-        )
-        api_response = json.loads(response)
-
-        # Load the data to Postgres
-        hook = PostgresHook(postgres_conn_id=_POSTGRES_CONN_ID)
-
-        csv_buffer = io.StringIO()
-        writer = csv.writer(csv_buffer)
-        writer.writerow(api_response.keys())
-        rows = zip(*api_response.values())
-        writer.writerows(rows)
-
-        csv_buffer.seek(0)
-
-        with open(f"{_SQL_DIR}/copy_insert.sql") as f:
-            sql = f.read()
-        sql = sql.replace("{schema}", _POSTGRES_SCHEMA)
-        sql = sql.replace("{table}", _POSTGRES_TRANSFORMED_TABLE)
-
-        conn = hook.get_conn()
-        cursor = conn.cursor()
-        cursor.copy_expert(sql=sql, file=csv_buffer)
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-    _extract = extract()
-    _transform = transform()
-    _load = load()
-    chain(_extract, _transform, _load)
-    chain(_tool_setup[0], _load)
-    chain(_tool_setup[1], _extract)
-
-
-etl_intermediary_storage()
+#     @task(task_id=_TRANSFORM_TASK_ID)
+#     def transform(**context):
+#         """
+#         Transform the data
+#         Args:
+#             api_response (dict): The full API response
+#         Returns:
+#             dict: The transformed data
+#         """
+#
+#         dag_run_timestamp = context["ts"]
+#         dag_id = context["dag"].dag_id
+#         upstream_task_id = _EXTRACT_TASK_ID
+#         task_id = context["task"].task_id
+#
+#         # Load the data from S3
+#         hook = S3Hook(aws_conn_id=_AWS_CONN_ID)
+#         response = hook.read_key(
+#             key=f"{dag_id}/{upstream_task_id}/{dag_run_timestamp}.json",
+#             bucket_name=_S3_BUCKET,
+#         )
+#         api_response = json.loads(response)
+#
+#         time = api_response["hourly"]["time"]
+#
+#         transformed_data = {
+#             "temperature_2m": api_response["hourly"]["temperature_2m"],
+#             "relative_humidity_2m": api_response["hourly"]["relative_humidity_2m"],
+#             "precipitation_probability": api_response["hourly"][
+#                 "precipitation_probability"
+#             ],
+#             "timestamp": time,
+#             "date": [
+#                 datetime.strptime(x, "%Y-%m-%dT%H:%M").date().strftime("%Y-%m-%d")
+#                 for x in time
+#             ],
+#             "day": [datetime.strptime(x, "%Y-%m-%dT%H:%M").day for x in time],
+#             "month": [datetime.strptime(x, "%Y-%m-%dT%H:%M").month for x in time],
+#             "year": [datetime.strptime(x, "%Y-%m-%dT%H:%M").year for x in time],
+#             "last_updated": [dag_run_timestamp for i in range(len(time))],
+#             "latitude": [api_response["latitude"] for i in range(len(time))],
+#             "longitude": [api_response["longitude"] for i in range(len(time))],
+#         }
+#
+#         transformed_data_bytes = json.dumps(transformed_data).encode("utf-8")
+#
+#         # Save the data to S3
+#         hook = S3Hook(aws_conn_id=_AWS_CONN_ID)
+#         hook.load_bytes(
+#             bytes_data=transformed_data_bytes,
+#             key=f"{dag_id}/{task_id}/{dag_run_timestamp}.json",
+#             bucket_name=_S3_BUCKET,
+#             replace=True,
+#         )
+#
+#     @task
+#     def load(**context):
+#         """
+#         Load the data to the destination without using a temporary CSV file.
+#         Args:
+#             transformed_data (dict): The transformed data
+#         """
+#         import csv
+#         import io
+#
+#         from airflow.providers.postgres.hooks.postgres import PostgresHook
+#
+#         dag_run_timestamp = context["ts"]
+#         dag_id = context["dag"].dag_id
+#         upstream_task_id = _TRANSFORM_TASK_ID
+#
+#         # Load the data from S3
+#         hook = S3Hook(aws_conn_id=_AWS_CONN_ID)
+#         response = hook.read_key(
+#             key=f"{dag_id}/{upstream_task_id}/{dag_run_timestamp}.json",
+#             bucket_name=_S3_BUCKET,
+#         )
+#         api_response = json.loads(response)
+#
+#         # Load the data to Postgres
+#         hook = PostgresHook(postgres_conn_id=_POSTGRES_CONN_ID)
+#
+#         csv_buffer = io.StringIO()
+#         writer = csv.writer(csv_buffer)
+#         writer.writerow(api_response.keys())
+#         rows = zip(*api_response.values())
+#         writer.writerows(rows)
+#
+#         csv_buffer.seek(0)
+#
+#         with open(f"{_SQL_DIR}/copy_insert.sql") as f:
+#             sql = f.read()
+#         sql = sql.replace("{schema}", _POSTGRES_SCHEMA)
+#         sql = sql.replace("{table}", _POSTGRES_TRANSFORMED_TABLE)
+#
+#         conn = hook.get_conn()
+#         cursor = conn.cursor()
+#         cursor.copy_expert(sql=sql, file=csv_buffer)
+#         conn.commit()
+#         cursor.close()
+#         conn.close()
+#
+#     _extract = extract()
+#     _transform = transform()
+#     _load = load()
+#     chain(_extract, _transform, _load)
+#     chain(_tool_setup[0], _load)
+#     chain(_tool_setup[1], _extract)
+#
+#
+# etl_intermediary_storage()
