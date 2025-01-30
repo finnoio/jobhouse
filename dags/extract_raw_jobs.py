@@ -265,7 +265,7 @@ def etl_intermediary_storage():
 #         cursor.close()
 #         conn.close()
 #
-#     _extract = extract()
+    _extract = extract()
 #     _transform = transform()
 #     _load = load()
 #     chain(_extract, _transform, _load)
@@ -273,4 +273,4 @@ def etl_intermediary_storage():
 #     chain(_tool_setup[1], _extract)
 #
 #
-# etl_intermediary_storage()
+etl_intermediary_storage()
