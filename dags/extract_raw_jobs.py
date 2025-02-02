@@ -6,6 +6,7 @@ loads it into a Postgres database in an ETL pattern.
 It uses S3 as an intermediary storage.
 """
 
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta
@@ -107,49 +108,51 @@ def etl_intermediary_storage():
     @task(task_id=_EXTRACT_TASK_ID)
     def extract(**context):
         """
-        Extract data from the Open-Meteo API
+        Extract data from the HH API
         Returns:
             dict: The full API response
         """
+        async def _async_extract():
+            url = os.getenv("WEATHER_API_URL")
 
-        url = os.getenv("WEATHER_API_URL")
+            search_input = context["params"]["search_input"]
+            dag_run_timestamp = context["ts"]
+            dag_id = context["dag"].dag_id
+            task_id = context["task"].task_id
 
-        search_input = context["params"]["search_input"]
-        dag_run_timestamp = context["ts"]
-        dag_id = context["dag"].dag_id
-        task_id = context["task"].task_id
+            # Initialize storage
+            storage = S3RawLayerStorage(
+                bucket="raw-layer",
+                metadata_db_conn_str="postgresql://postgres:postgres@localhost:5432/jobs_meta",
+                endpoint_url="http://localhost:9000",  # MinIO endpoint
+                aws_access_key_id="minio_access_key",
+                aws_secret_access_key="minio_secret_key"
+            )
+            await storage.initialize()
 
-        # Initialize storage
-        storage = S3RawLayerStorage(
-            bucket="raw-layer",
-            metadata_db_conn_str="postgresql://postgres:postgres@localhost:5432/jobs_meta",
-            endpoint_url="http://localhost:9000",  # MinIO endpoint
-            aws_access_key_id="minio_access_key",
-            aws_secret_access_key="minio_secret_key"
-        )
-        await storage.initialize()
+            # Initialize source
+            config = {
+                'user_agent': 'curl/7.64.1'
+            }
 
-        # Initialize source
-        config = {
-            'user_agent': 'curl/7.64.1'
-        }
+            source = HHAsyncClient(config)
+            try:
+                # Generate batch ID
+                batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        source = HHAsyncClient(config)
-        try:
-            # Generate batch ID
-            batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # Store postings
+                async for metadata in storage.store_postings(
+                        source.fetch_postings(search_input),
+                        batch_id
+                ):
+                    logger.info(f"Stored posting {metadata.posting_id} in s3://{storage.bucket}/{metadata.s3_key}")
 
-            # Store postings
-            async for metadata in storage.store_postings(
-                    source.fetch_postings(search_input),
-                    batch_id
-            ):
-                logger.info(f"Stored posting {metadata.posting_id} in s3://{storage.bucket}/{metadata.s3_key}")
+                # Implement retention policy
+                await storage.implement_retention_policy(days=7)
+            finally:
+                await source.close()
 
-            # Implement retention policy
-            await storage.implement_retention_policy(days=7)
-        finally:
-            await source.close()
+        asyncio.run(_async_extract())
         # response = requests.get(url).json()
         #
         # response_bytes = json.dumps(response).encode("utf-8")
