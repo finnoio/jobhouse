@@ -124,7 +124,7 @@ def etl_intermediary_storage():
             storage = S3RawLayerStorage(
                 bucket="raw-layer",
                 metadata_db_conn_str="postgresql://postgres:postgres@localhost:5432/jobs_meta",
-                endpoint_url="http://localhost:9000",  # MinIO endpoint
+                endpoint_url="http://172.18.0.1:9000",  # MinIO endpoint
                 aws_access_key_id="minio_access_key",
                 aws_secret_access_key="minio_secret_key"
             )
