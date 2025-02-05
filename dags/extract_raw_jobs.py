@@ -1,9 +1,5 @@
 """
-## Simple ETL DAG loading data from the Open-Meteo API to a Postgres database
-
-This DAG extracts weather data from the Open-Meteo API, transforms it, and
-loads it into a Postgres database in an ETL pattern.
-It uses S3 as an intermediary storage.
+## ETL DAG loading data from the HH API to a Minio bucket
 """
 
 import asyncio
@@ -37,9 +33,6 @@ _S3_BUCKET = os.getenv("S3_BUCKET", "open-meteo-etl")
 _POSTGRES_CONN_ID = os.getenv("POSTGRES_CONN_ID", "postgres_default")
 _POSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "postgres")
 _POSTGRES_SCHEMA = os.getenv("POSTGRES_SCHEMA", "public")
-_POSTGRES_TRANSFORMED_TABLE = os.getenv(
-    "POSTGRES_WEATHER_TABLE_TRANSFORMED", f"model_weather_data_{DAG_ID}"
-)
 _SQL_DIR = os.path.join(
     os.path.dirname(__file__), f"../../include/sql/pattern_dags/{DAG_ID}"
 )
@@ -86,22 +79,13 @@ def etl_intermediary_storage():
 
     @task_group
     def tool_setup():
-
-        _create_table_if_not_exists = SQLExecuteQueryOperator(
-            task_id="create_table_if_not_exists",
-            conn_id=_POSTGRES_CONN_ID,
-            database=_POSTGRES_DATABASE,
-            sql="create_table_if_not_exists.sql",
-            params={"schema": _POSTGRES_SCHEMA, "table": _POSTGRES_TRANSFORMED_TABLE},
-        )
-
         _create_bucket_if_not_exists = S3CreateBucketOperator(
             task_id="create_bucket_if_not_exists",
             bucket_name=_S3_BUCKET,
             aws_conn_id=_AWS_CONN_ID,
         )
 
-        return _create_table_if_not_exists, _create_bucket_if_not_exists
+        return _create_bucket_if_not_exists
 
     _tool_setup = tool_setup()
 
@@ -113,8 +97,6 @@ def etl_intermediary_storage():
             dict: The full API response
         """
         async def _async_extract():
-            url = os.getenv("WEATHER_API_URL")
-
             search_input = context["params"]["search_input"]
             dag_run_timestamp = context["ts"]
             dag_id = context["dag"].dag_id
