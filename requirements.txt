@@ -1,7 +1,7 @@
 aioboto3>=13.2.0
 aiohttp>=3.10.10
 aiopg>=1.4.0
-apache-airflow-providers-amazon>=8.29.0
+apache-airflow-providers-amazon
 alembic>=1.13.3
 asyncpg>=0.30.0
 flask>=2.2.1
@@ -9,5 +9,5 @@ playwright>=1.48.0
 pydantic-settings>=2.6.0
 python-telegram-bot>=21.6
 requests>=2.32.3
-sqlalchemy>=1.4.54
+sqlalchemy>=1.4.53
 structlog>=24.4.0

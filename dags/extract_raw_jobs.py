@@ -51,7 +51,6 @@ _TRANSFORM_TASK_ID = "transform"
     schedule="@daily",  # see: https://www.astronomer.io/docs/learn/scheduling-in-airflow for options
     catchup=False,  # see: https://www.astronomer.io/docs/learn/rerunning-dags#catchup
     max_active_runs=1,  # maximum number of active DAG runs
-    max_consecutive_failed_dag_runs=5,  # auto-pauses the DAG after 5 consecutive failed runs, experimental
     doc_md=__doc__,  # add DAG Docs in the UI, see https://www.astronomer.io/docs/learn/custom-airflow-ui-docs-tutorial
     default_args={
         "owner": "me",  # owner of this DAG in the Airflow UI
