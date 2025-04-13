@@ -1,20 +1,19 @@
-from dataclasses import dataclass
 from datetime import datetime
 
-@dataclass
-class RawJobPosting:
-    source_id: str
-    raw_content: str
-    metadata: dict
-    timestamp: datetime
+from pydantic import BaseModel, Field, Json
 
 
-@dataclass
-class StorageMetadata:
+class RawJobPosting(BaseModel):
     posting_id: str
+    raw_content: dict
+    metadata: dict
+    source: str
+    extracted_at: datetime
+
+
+class StorageMetadata(BaseModel):
     source: str
     batch_id: str
     s3_key: str
     created_at: datetime
-    size_bytes: int
     etag: str

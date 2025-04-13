@@ -27,12 +27,14 @@ logger = logging.getLogger(__name__)
 
 DAG_ID = os.path.basename(__file__).replace(".py", "")
 
-_AWS_CONN_ID = os.getenv("MINIO_CONN_ID", "minio_local")
-_S3_BUCKET = os.getenv("S3_BUCKET", "open-meteo-etl")
+_AWS_CONN_ID = os.getenv("MINIO_CONN_ID", "MINIO_CONN_ID")
+_S3_BUCKET = os.getenv("S3_BUCKET", "bronze-layer")
 
 _POSTGRES_CONN_ID = os.getenv("POSTGRES_CONN_ID", "postgres_default")
 _POSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "postgres")
 _POSTGRES_SCHEMA = os.getenv("POSTGRES_SCHEMA", "public")
+_HH_ACCESS_TOKEN = os.getenv("HH_ACCESS_TOKEN", "public")
+
 _SQL_DIR = os.path.join(
     os.path.dirname(__file__), f"../../include/sql/pattern_dags/{DAG_ID}"
 )
@@ -48,7 +50,7 @@ _TRANSFORM_TASK_ID = "transform"
 @dag(
     dag_id=DAG_ID,
     start_date=datetime(2024, 9, 23),  # date after which the DAG can be scheduled
-    schedule="@daily",  # see: https://www.astronomer.io/docs/learn/scheduling-in-airflow for options
+    schedule="@daily",
     catchup=False,  # see: https://www.astronomer.io/docs/learn/rerunning-dags#catchup
     max_active_runs=1,  # maximum number of active DAG runs
     doc_md=__doc__,  # add DAG Docs in the UI, see https://www.astronomer.io/docs/learn/custom-airflow-ui-docs-tutorial
@@ -57,7 +59,7 @@ _TRANSFORM_TASK_ID = "transform"
         "retries": 3,  # tasks retry 3 times before they fail
         "retry_delay": timedelta(seconds=30),  # tasks wait 30s in between retries
     },
-    tags=["Patterns", "ETL", "Postgres", "Intermediary Storage"],  # add tags in the UI
+    tags=["BRONZE"],
     params={
         "search_input": Param("python data engineer", type="string"),
     },  # Airflow params can add interactive options on manual runs. See: https://www.astronomer.io/docs/learn/airflow-params
@@ -78,6 +80,7 @@ def etl_intermediary_storage():
 
     @task_group
     def tool_setup():
+        logger.info("AWS Connection ID: %s", _AWS_CONN_ID)
         _create_bucket_if_not_exists = S3CreateBucketOperator(
             task_id="create_bucket_if_not_exists",
             bucket_name=_S3_BUCKET,
@@ -95,6 +98,12 @@ def etl_intermediary_storage():
         Returns:
             dict: The full API response
         """
+        # extra = {"endpoint_url": "http://host.docker.internal:9000", "aws_access_key_id": "minio_access_key", "aws_secret_access_key": "minio_secret_key"}
+        # endpoint_url="http://minio:9000",  # MinIO endpoint
+        #                 aws_access_key_id="minio_access_key",
+        #                 aws_secret_access_key="minio_secret_key",
+        s3_hook = S3Hook(aws_conn_id=_AWS_CONN_ID)
+        s3_session = s3_hook.get_session()
         async def _async_extract():
             search_input = context["params"]["search_input"]
             dag_run_timestamp = context["ts"]
@@ -103,13 +112,9 @@ def etl_intermediary_storage():
 
             # Initialize storage
             storage = S3RawLayerStorage(
-                bucket="raw-layer",
-                metadata_db_conn_str="postgresql://postgres:postgres@postgres:5432/jobs_meta",
-                endpoint_url="http://minio:9000",  # MinIO endpoint
-                aws_access_key_id="minio_access_key",
-                aws_secret_access_key="minio_secret_key"
+                bucket=_S3_BUCKET,
+                s3_session=s3_session
             )
-            await storage.initialize()
 
             # Initialize source
             config = {
@@ -119,17 +124,11 @@ def etl_intermediary_storage():
             source = HHAsyncClient(config)
             try:
                 # Generate batch ID
-                batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
+                postings = await source.fetch_vacancies(search_input)
                 # Store postings
-                async for metadata in storage.store_postings(
-                        source.fetch_postings(search_input),
-                        batch_id
-                ):
-                    logger.info(f"Stored posting {metadata.posting_id} in s3://{storage.bucket}/{metadata.s3_key}")
-
-                # Implement retention policy
-                await storage.implement_retention_policy(days=7)
+                batch_id = f"{search_input.replace(' ','')}_{datetime.now.strftime('%Y%m%d_%H%M%S')}"
+                metadata = storage.store_postings(postings, batch_id)
+                logger.info(f"Stored {len(postings)} postings from source_id={metadata.source} in s3://{storage.bucket}/{metadata.s3_key}")
             finally:
                 await source.close()
 

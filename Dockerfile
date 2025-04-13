@@ -1,4 +1,4 @@
-FROM apache/airflow:2.8.4-python3.11
+FROM apache/airflow:2.10.5-python3.11
 
 WORKDIR /opt/airflow
 ADD ./requirements.txt /opt/airflow/requirements.txt

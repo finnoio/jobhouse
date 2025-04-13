@@ -1,4 +1,5 @@
 import os
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from typing import AsyncIterator, Optional, Set, Dict
@@ -10,6 +11,33 @@ from collections import deque
 from src.common.data import RawJobPosting
 
 logger = logging.getLogger(__name__)
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+logging.getLogger('aiohttp.client').setLevel(logging.DEBUG)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+async def on_request_start(session, trace_config_ctx, params):
+    logger.info(f"Starting request {params.method} {params.url}")
+    trace_config_ctx.start = asyncio.get_event_loop().time()
+
+async def on_request_end(session, trace_config_ctx, params):
+    elapsed = asyncio.get_event_loop().time() - trace_config_ctx.start
+    logger.info(f"Request {params.method} {params.url} completed in {elapsed:.3f} seconds")
+    logger.info(f"Status: {params.response.status}")
+    logger.info(f"Headers: {params.response.headers}")
+
+async def on_request_exception(session, trace_config_ctx, params):
+    logger.error(f"Request error: {params.exception}")
 
 
 class RateLimiter:
@@ -25,7 +53,7 @@ class RateLimiter:
         self.period = period
         self.timestamps = deque()
 
-    async def acquire(self) -> None:
+    def acquire(self) -> None:
         """Wait until a call can be made without violating the rate limit"""
         now = datetime.now()
 
@@ -38,7 +66,7 @@ class RateLimiter:
             sleep_time = (self.timestamps[0] + timedelta(seconds=self.period) - now).total_seconds()
             if sleep_time > 0:
                 logger.debug(f"Rate limit reached. Sleeping for {sleep_time:.2f} seconds")
-                await asyncio.sleep(sleep_time)
+                time.sleep(sleep_time)
 
         self.timestamps.append(now)
 
@@ -77,10 +105,10 @@ class HHAsyncClient(AsyncHttpClientBase):
         # HH.ru allows 7 requests per second (https://github.com/hhru/api/issues/74#issuecomment-902696296)
         return RateLimiter(calls=1, period=1)
 
-    async def _fetch_single_page(self, page: int, search_text: str) -> Dict:
+    def _fetch_single_page(self, page: int, search_text: str) -> Dict:
         """Fetch a single page of vacancy listings."""
         while True:
-            await self._rate_limiter.acquire()
+            self._rate_limiter.acquire()
 
             params = {
                 'text': search_text,
@@ -90,31 +118,30 @@ class HHAsyncClient(AsyncHttpClientBase):
             }
 
             try:
-                async with self._session.get(
+                with self._session.get(
                         f"{self.base_url}/vacancies",
                         params=params
                 ) as response:
                     if response.status == 429:
                         logger.warning(f"Rate limit exceeded on page {page}, backing off...")
-                        await asyncio.sleep(5)
+                        time.sleep(5)
                         continue
 
-                    response.raise_for_status()
-                    return await response.json()
+                    return response.json()
             except Exception as e:
                 logger.error(f"Unexpected error while fetching page {page}: {str(e)}")
                 raise
 
-    async def _fetch_all_vacancy_ids(self, search_text: str) -> Set[str]:
-        """First phase: Collect all vacancy IDs by fetching all pages in parallel."""
-        first_page = await self._fetch_single_page(0, search_text)
+    async def fetch_vacancies(self, search_text: str) -> list[RawJobPosting]:
+        """Fetch vacancies from /vacancies?text=search_text endpoint"""
+        first_page = self._fetch_single_page(0, search_text)
         if not first_page or not first_page.get('items'):
-            return set()
+            return list()
 
         total_pages = first_page['pages']
         logger.info(f"Total pages to fetch: {total_pages}")
 
-        # Create tasks for all pages (including page 0 again as it's simpler)
+        # Create tasks for all pages
         tasks = [
             self._fetch_single_page(page, search_text)
             for page in range(total_pages)
@@ -123,71 +150,82 @@ class HHAsyncClient(AsyncHttpClientBase):
         # Fetch all pages in parallel
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Process results and collect IDs
-        all_ids = set()
+        # Process results
+        final_result = []
         for page_num, result in enumerate(results):
             if isinstance(result, Exception):
-                logger.error(f"Failed to fetch page {page_num}: {result}")
-                continue
-            if result and result.get('items'):
-                page_ids = {str(item['id']) for item in result['items']}
-                all_ids.update(page_ids)
-
-        return all_ids
-
-    async def _fetch_single_vacancy(self, vacancy_id: str, search_text: str) -> RawJobPosting:
-        """Fetch details for a single vacancy ID."""
-        while True:
-            await self._rate_limiter.acquire()
-
-            try:
-                async with self._session.get(
-                        f"{self.base_url}/vacancies/{vacancy_id}"
-                ) as response:
-                    if response.status == 429:
-                        logger.warning(f"Rate limit exceeded for vacancy {vacancy_id}, backing off...")
-                        await asyncio.sleep(5)
-                        continue
-
-                    response.raise_for_status()
-                    detail_data = await response.json()
-
-                    return RawJobPosting(
-                        source_id=vacancy_id,
-                        raw_content=detail_data,
+                err_message = f"Failed to fetch page {page_num}: {result}"
+                logger.error(err_message)
+                raise aiohttp.ClientError(err_message)
+            elif result and result.get('items'):
+                page = [
+                    RawJobPosting(
+                        posting_id=str(item['id']),
+                        raw_content=item,
                         metadata={
-                            'search_text': search_text,
-                            'found_at': datetime.now().isoformat(),
-                            'source': 'HH',
+                            'search_text': search_text
                         },
-                        timestamp=datetime.now()
-                    )
-            except Exception as e:
-                logger.error(f"Unexpected error while fetching vacancy {vacancy_id}: {str(e)}")
-                raise
+                        source='HH',
+                        extracted_at=datetime.now()
+                    ) for item in result['items']
+                ]
 
-    async def fetch_postings(self, search_text: str) -> AsyncIterator[RawJobPosting]:
-        await self._ensure_session()
+                final_result.extend(page)
 
-        # Collect all vacancy IDs (now in parallel)
-        all_vacancy_ids = await self._fetch_all_vacancy_ids(search_text)
-        logger.info(f"Collected {len(all_vacancy_ids)} vacancy IDs")
+        return final_result
 
-        # Fetch details for all vacancies concurrently
-        batch_size = 10
-        vacancy_ids = list(all_vacancy_ids)
-
-        for i in range(0, len(vacancy_ids), batch_size):
-            batch = vacancy_ids[i:i + batch_size]
-            tasks = [
-                self._fetch_single_vacancy(vacancy_id, search_text)
-                for vacancy_id in batch
-            ]
-
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error(f"Failed to fetch vacancy details: {result}")
-                    continue
-                yield result
+    # async def _fetch_single_vacancy(self, vacancy_id: str, search_text: str) -> RawJobPosting:
+    #     """Fetch details for a single vacancy ID."""
+    #     while True:
+    #         await self._rate_limiter.acquire()
+    #
+    #         try:
+    #             async with self._session.get(
+    #                     f"{self.base_url}/vacancies/{vacancy_id}"
+    #             ) as response:
+    #                 if response.status == 429:
+    #                     logger.warning(f"Rate limit exceeded for vacancy {vacancy_id}, backing off...")
+    #                     await asyncio.sleep(5)
+    #                     continue
+    #
+    #                 response.raise_for_status()
+    #                 detail_data = await response.json()
+    #
+    #                 return RawJobPosting(
+    #                     source_id=vacancy_id,
+    #                     raw_content=detail_data,
+    #                     metadata={
+    #                         'search_text': search_text,
+    #                         'source': 'HH',
+    #                     },
+    #                     timestamp=datetime.now()
+    #                 )
+    #         except Exception as e:
+    #             logger.error(f"Unexpected error while fetching vacancy {vacancy_id}: {str(e)}")
+    #             raise
+    #
+    # async def fetch_postings(self, search_text: str) -> AsyncIterator[RawJobPosting]:
+    #     await self._ensure_session()
+    #
+    #     # Collect all vacancy IDs (now in parallel)
+    #     all_vacancy_ids = await self._fetch_all_vacancy_ids(search_text)
+    #     logger.info(f"Collected {len(all_vacancy_ids)} vacancy IDs")
+    #
+    #     # Fetch details for all vacancies concurrently
+    #     batch_size = 10
+    #     vacancy_ids = list(all_vacancy_ids)
+    #
+    #     for i in range(0, len(vacancy_ids), batch_size):
+    #         batch = vacancy_ids[i:i + batch_size]
+    #         tasks = [
+    #             self._fetch_single_vacancy(vacancy_id, search_text)
+    #             for vacancy_id in batch
+    #         ]
+    #
+    #         results = await asyncio.gather(*tasks, return_exceptions=True)
+    #
+    #         for result in results:
+    #             if isinstance(result, Exception):
+    #                 logger.error(f"Failed to fetch vacancy details: {result}")
+    #                 continue
+    #             yield result
